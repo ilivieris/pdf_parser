@@ -9,14 +9,24 @@ Minimal document-processing API for the chatbot template.
 
 ## Contract
 
-- `/extract` loads a file from local disk using `path`. `path` may be an absolute filesystem path, or a path relative to `DOCUMENT_STORAGE_ROOT`.
+- `/extract` loads a file from local disk using `path`. `path` may be an absolute filesystem path, or a path relative to `DOCUMENT_OUTPUT_ROOT`.
 - When running via Docker Compose, `path` is resolved **inside the container**, so the source file must be reachable through a mounted volume (see `docker-compose.yml`).
-- If `filename` is provided to `/extract`, it is treated as a parser routing hint and its extension must match the `path` extension when the path has one.
+- `filename` is optional. It's only needed when `path` itself has no file extension (some Diavgeia-style keys don't); it tells the parser which format to use and names the output file. If `path` already has an extension and `filename` is also given, their extensions must match.
 - Supported extraction formats are `PDF`, `DOCX`, `DOC`, and text-like files listed in `core/config.py`.
-- Extracted text is always written back to disk (under `DOCUMENT_STORAGE_ROOT`) as `.txt`.
-- `export_markdown=true` writes an additional `.md` artifact.
-- `correct_text=true` sends the extracted text to the configured OpenAI model to fix spelling/grammar and improve layout, and writes the result as a separate `.txt` artifact (the original extracted text is left untouched). Requires `OPENAI_API_KEY` to be set.
+- `post_processing` controls what gets written back to disk (under `DOCUMENT_OUTPUT_ROOT`):
+  - `none` (default): the raw extracted text, as-is.
+  - `clean`: the text is sent to the configured OpenAI model to fix spelling/grammar and improve layout, output as plain text.
+  - `markdown`: the text is sent to the configured OpenAI model with its own prompt that fixes spelling/grammar **and** formats the result as markdown in a single pass — it's an independent correction call, not `clean` followed by a markdown conversion step.
+- If a `clean`/`markdown` request's text is too large for the configured OpenAI model (see "Large documents" below), correction is skipped and the response's `note` field explains why; the raw extracted text is returned instead.
 - Extraction failures return an error instead of silently writing empty output.
+
+## Large Documents And Chunking
+
+Text correction chunks by `MAX_TOKENS`:
+
+- If the document is **≤ `MAX_TOKENS`**, it's corrected in a single OpenAI request.
+- If it's **between `MAX_TOKENS` and `10 × MAX_TOKENS`**, it's split into paragraph-aligned chunks and corrected in parallel (`DOCUMENT_CORRECTION_CHUNK_PARALLELISM` concurrent requests), then the corrected chunks are joined back together in order.
+- If it's **over `10 × MAX_TOKENS`**, correction is skipped entirely and `note` in the response explains that it was too large.
 
 ## Historical Comparison
 
@@ -71,8 +81,7 @@ Result from the current minimal pipeline:
 
 - Extract: `char_count=212396`
 - Extract text preview starts with the table of contents in Greek as expected
-- Markdown export: `storage/markdown/790ff7612eeff714/notes.md`
-- Markdown char count: `212399`
+- Markdown export: `extracted/markdown/790ff7612eeff714/notes.md`
 
 Docling status in this runtime:
 
@@ -97,13 +106,12 @@ Invoke-RestMethod -Uri http://localhost:8000/health
 
 ## Extract Example
 
-`path` is resolved inside the container. The compose file mounts `./diavgeia_sample` at `/app/storage/diavgeia_sample`, so a path relative to `DOCUMENT_STORAGE_ROOT` such as `diavgeia_sample/pdf/6Α8546ΜΤΛ6-Ρ70.pdf` resolves to that mounted file. To read from anywhere else on disk, add another volume mount and reference its container-side path.
+`path` is resolved inside the container. The compose file mounts `./diavgeia_sample` at `/app/extracted/diavgeia_sample`, so a path relative to `DOCUMENT_OUTPUT_ROOT` such as `diavgeia_sample/pdf/6Α8546ΜΤΛ6-Ρ70.pdf` resolves to that mounted file. To read from anywhere else on disk, add another volume mount and reference its container-side path.
 
 ```powershell
 $body = @{
   path = "diavgeia_sample/pdf/6Α8546ΜΤΛ6-Ρ70.pdf"
-  export_markdown = $true
-  correct_text = $true
+  post_processing = "markdown"
 } | ConvertTo-Json
 
 Invoke-RestMethod `
@@ -113,31 +121,28 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-Expected response fields:
+Response fields:
 
-- `source_path`
-- `text_path`
-- `char_count`
-- `text_preview`
-- `markdown_path` only when `export_markdown=true`
-- `corrected_path`, `corrected_char_count`, `corrected_text_preview` only when `correct_text=true`
+- `filename`, `source_path`, `artifact_id`
+- `text_path` — where the (raw/clean/markdown) output was written
+- `note` — present only when something noteworthy happened, e.g. correction was skipped for being too large
 
 ## Environment Variables
 
 Optional:
 
-- `DOCUMENT_STORAGE_ROOT=./storage`
-- `DOCUMENT_MARKDOWN_CHUNK_MAX_CHARS=4000`
+- `DOCUMENT_OUTPUT_ROOT=./extracted`
 - `DOCUMENT_EXTRACTION_WORKERS=2`
 - `DOCUMENT_OCR_DPI=200`
 - `DOCUMENT_OCR_MAX_PAGES=50`
 - `DOCUMENT_OCR_TIMEOUT_SECONDS=120`
+- `DOCUMENT_CORRECTION_CHUNK_PARALLELISM=4`
 
-Required only for `correct_text=true`:
+Required only for `post_processing=clean` or `post_processing=markdown`:
 
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL` (default `gpt-4.1`)
-- `MAX_TOKENS` (default `4096`, caps the correction response length)
+- `MAX_TOKENS` (default `4096`) — caps each correction request's output, and also sets the chunking thresholds (see "Large Documents And Chunking")
 
 ## OCR Support In Docker Image
 

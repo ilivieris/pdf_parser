@@ -16,7 +16,7 @@ class ObjectNotFoundError(ObjectStorageError):
 
 class LocalFileStore:
     def __init__(self) -> None:
-        self._root = Path(settings.document_storage_root).expanduser().resolve()
+        self._root = Path(settings.document_output_root).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
 
     def put_bytes(self, *, key: str, data: bytes) -> str:

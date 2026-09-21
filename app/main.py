@@ -27,20 +27,13 @@ def health() -> dict:
 
 @app.post("/extract", response_model=ExtractResponse)
 async def extract_document(payload: ExtractRequest) -> ExtractResponse:
-    log_event(
-        logger,
-        "document_extract_received",
-        path=payload.path,
-        export_markdown=payload.export_markdown,
-        correct_text=payload.correct_text,
-    )
+    log_event(logger, "document_extract_received", path=payload.path, post_processing=payload.post_processing)
 
     try:
         result = await anyio.to_thread.run_sync(
             lambda: extract_document_from_local(
                 path=payload.path,
-                export_markdown=payload.export_markdown,
-                correct_text=payload.correct_text,
+                post_processing=payload.post_processing,
                 filename=payload.filename,
             ),
             limiter=_extraction_limiter,
@@ -64,11 +57,4 @@ async def extract_document(payload: ExtractRequest) -> ExtractResponse:
         logger.exception("Unexpected extraction failure.")
         raise HTTPException(status_code=500, detail="Extraction failed.") from exc
 
-    log_event(
-        logger,
-        "document_extract_finished",
-        path=result["source_path"],
-        text_path=result["text_path"],
-        export_markdown=payload.export_markdown,
-    )
     return ExtractResponse.model_validate(result)

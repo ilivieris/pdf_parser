@@ -48,11 +48,6 @@ _IRREGULAR_CHARS = {
     "\u00C3\u00A2\u00E2\u201A\u00AC\u00EF\u00BF\u00BD": '"',
 }
 
-_TABLE_ROW_PATTERN = re.compile(
-    r"(\$?\d[\d,]*)\s+(\$?\d[\d,]*)\s+(\$?\d[\d,]*)\s+(\$?\d[\d,]*)\s+(\$?\d[\d,]*)"
-)
-
-
 def parse_pdf(path: Path) -> str:
     import pdfplumber
 
@@ -62,13 +57,13 @@ def parse_pdf(path: Path) -> str:
     with pdfplumber.open(str(path)) as pdf:
         for page in pdf.pages:
             raw_text = page.extract_text() or ""
-            layout_text = page.extract_text(layout=True) or raw_text
 
             if raw_text.strip():
                 raw_pages_text.append(raw_text)
 
-            if page.find_tables():
-                rendered_page = _render_layout_page(layout_text)
+            tables = _find_tables(page)
+            if tables:
+                rendered_page = _render_page_with_tables(page, tables)
             else:
                 rendered_page = _preprocess_pdf_text(raw_text)
 
@@ -226,112 +221,107 @@ def _normalize_layout_line(line: str) -> str:
     return normalized.strip()
 
 
-def _is_table_header_line(line: str) -> bool:
-    return (
-        line.startswith("If Your Taxable ")
-        or line.startswith("Income Is ... Filing Status")
-        or line.startswith("At But Not ")
-        or line.startswith("Least Over ")
-        or line.startswith("1 Or 3 2 Or 5 4")
-    )
-
-
-def _extract_table_row_groups(line: str) -> list[list[str]]:
-    return [list(match.groups()) for match in _TABLE_ROW_PATTERN.finditer(line)]
-
-
 def _escape_markdown_cell(value: str) -> str:
     return value.replace("|", "\\|")
 
 
-def _rows_to_markdown_table(rows: list[list[list[str]]]) -> str:
-    if not rows:
+def _find_tables(page):
+    # Bordered tables first (ruling lines); Diavgeia-style documents are often
+    # borderless, so fall back to alignment-based detection when that finds nothing.
+    # min_words_vertical is set high to require strong, repeated column alignment —
+    # otherwise ordinary justified paragraphs get misdetected as tables and words
+    # get split mid-word at the perceived column boundaries.
+    tables = page.find_tables()
+    if tables:
+        return tables
+    return page.find_tables(
+        table_settings={"vertical_strategy": "text", "horizontal_strategy": "text", "min_words_vertical": 20}
+    )
+
+
+def _table_to_markdown(rows: list[list[str | None]]) -> str:
+    cleaned_rows = [
+        [_normalize_layout_line((cell or "").replace("\n", " ")) for cell in row]
+        for row in rows
+        if any((cell or "").strip() for cell in row)
+    ]
+    if not cleaned_rows:
         return ""
 
-    max_groups = max(len(row) for row in rows)
-    header_cells: list[str] = []
-    alignments: list[str] = []
-    for group_index in range(max_groups):
-        suffix = "" if max_groups == 1 else f" {group_index + 1}"
-        header_cells.extend(
-            [
-                f"At least{suffix}",
-                f"But not over{suffix}",
-                f"1 or 3{suffix}",
-                f"2 or 5{suffix}",
-                f"4{suffix}",
-            ]
-        )
-        alignments.extend(["---:"] * 5)
+    width = max(len(row) for row in cleaned_rows)
+    cleaned_rows = [row + [""] * (width - len(row)) for row in cleaned_rows]
 
+    header, *data_rows = cleaned_rows
     lines = [
-        "| " + " | ".join(header_cells) + " |",
-        "| " + " | ".join(alignments) + " |",
+        "| " + " | ".join(_escape_markdown_cell(cell) for cell in header) + " |",
+        "| " + " | ".join(["---"] * width) + " |",
     ]
-
-    for row in rows:
-        padded_groups = row + ([["", "", "", "", ""]] * (max_groups - len(row)))
-        flattened = [cell for group in padded_groups for cell in group]
-        lines.append("| " + " | ".join(_escape_markdown_cell(cell) for cell in flattened) + " |")
+    for row in data_rows:
+        lines.append("| " + " | ".join(_escape_markdown_cell(cell) for cell in row) + " |")
 
     return "\n".join(lines)
 
 
-def _render_text_block(lines: list[str]) -> str:
-    rendered: list[str] = []
-    for line in lines:
-        if line.startswith("- "):
-            rendered.append(line)
-        elif line.startswith("-"):
-            rendered.append(f"- {line[1:].strip()}")
+def _group_words_into_lines(words: list[dict], tolerance: float = 3.0) -> list[tuple[float, str]]:
+    ordered = sorted(words, key=lambda w: (w["top"], w["x0"]))
+    grouped: list[list[dict]] = []
+    for word in ordered:
+        if grouped and abs(word["top"] - grouped[-1][-1]["top"]) <= tolerance:
+            grouped[-1].append(word)
         else:
-            rendered.append(line)
-    return "\n".join(rendered).strip()
+            grouped.append([word])
+
+    lines: list[tuple[float, str]] = []
+    for line_words in grouped:
+        line_words.sort(key=lambda w: w["x0"])
+        text = " ".join(w["text"] for w in line_words)
+        lines.append((min(w["top"] for w in line_words), text))
+    return lines
 
 
-def _render_layout_page(layout_text: str) -> str:
+def _render_page_with_tables(page, tables) -> str:
+    words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+    lines = _group_words_into_lines(words)
+
+    # (vertical position, kind, content) so text and tables interleave in reading order.
+    blocks: list[tuple[float, str, str]] = []
+    for top, text in lines:
+        if any(table.bbox[1] - 1 <= top <= table.bbox[3] + 1 for table in tables):
+            continue
+        normalized = _normalize_layout_line(text)
+        if normalized:
+            blocks.append((top, "text", normalized))
+
+    for table in tables:
+        markdown = _table_to_markdown(table.extract())
+        if markdown:
+            blocks.append((table.bbox[1], "table", markdown))
+
+    blocks.sort(key=lambda block: block[0])
+
     sections: list[str] = []
     text_buffer: list[str] = []
-    table_rows: list[list[list[str]]] = []
 
     def flush_text() -> None:
         nonlocal text_buffer
         if not text_buffer:
             return
-        block = _render_text_block(text_buffer)
+        # Each item is already one reconstructed visual line, so only join
+        # hyphen-wrapped words across line breaks — don't collapse lines into a
+        # single paragraph the way _preprocess_pdf_text does for raw PDF text.
+        block = _fix_pdf_hyphenation("\n".join(text_buffer)).strip()
         if block:
             sections.append(block)
         text_buffer = []
 
-    def flush_table() -> None:
-        nonlocal table_rows
-        if not table_rows:
-            return
-        sections.append(_rows_to_markdown_table(table_rows))
-        table_rows = []
-
-    for raw_line in layout_text.splitlines():
-        line = _normalize_layout_line(raw_line)
-        if not line:
+    for _, kind, content in blocks:
+        if kind == "table":
             flush_text()
-            continue
-
-        row_groups = _extract_table_row_groups(line)
-        if row_groups:
-            flush_text()
-            table_rows.append(row_groups)
-            continue
-
-        if table_rows:
-            flush_table()
-
-        if _is_table_header_line(line):
-            continue
-
-        text_buffer.append(line)
+            sections.append(content)
+        else:
+            text_buffer.append(content)
 
     flush_text()
-    flush_table()
     return "\n\n".join(section for section in sections if section.strip())
 
 

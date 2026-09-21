@@ -3,7 +3,7 @@
 __pycache__
 *.py[cod]
 .pytest_cache
-storage
+extracted
 diavgeia_sample
 tests
 README.md

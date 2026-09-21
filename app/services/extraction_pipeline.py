@@ -5,11 +5,16 @@ import re
 import unicodedata
 from pathlib import Path
 
-from document_processor_service.app.core.config import settings
+from document_processor_service.app.core.contracts import PostProcessing
+from document_processor_service.app.core.logging import get_logger, log_event
 from document_processor_service.app.core.object_storage import ObjectNotFoundError, get_local_store
-from document_processor_service.app.services.document_processing.markdown_extractor import render_markdown_document
 from document_processor_service.app.services.document_processing.parser import DocumentParser
-from document_processor_service.app.services.document_processing.text_corrector import correct_text as run_text_correction
+from document_processor_service.app.services.document_processing.text_corrector import (
+    correct_text,
+    correct_text_to_markdown,
+)
+
+logger = get_logger("services.document_processor_service.extraction_pipeline")
 
 
 def _safe_filename(filename: str) -> str:
@@ -40,14 +45,6 @@ def _artifact_id(*parts: str | bytes) -> str:
     return digest.hexdigest()[:16]
 
 
-def _preview_text(text: str, limit: int | None = None) -> str:
-    bounded = max(1, limit or settings.document_preview_chars)
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if len(normalized) <= bounded:
-        return normalized
-    return f"{normalized[:bounded].rstrip()}..."
-
-
 def _validate_filename_hint(path: str, filename: str | None) -> None:
     if not filename:
         return
@@ -61,8 +58,7 @@ def _validate_filename_hint(path: str, filename: str | None) -> None:
 def extract_document_from_local(
     *,
     path: str,
-    export_markdown: bool = False,
-    correct_text: bool = False,
+    post_processing: PostProcessing = "none",
     filename: str | None = None,
 ) -> dict[str, object]:
     normalized_path = str(path or "").strip()
@@ -85,36 +81,51 @@ def extract_document_from_local(
     text = parser.parse_bytes(data, parser_suffix)
     artifact_id = _artifact_id(normalized_path, data)
     safe_stem = _safe_stem(resolved_filename)
-    text_key = _join_key("extracted", artifact_id, f"{safe_stem}.txt")
-    text_path = store.put_bytes(key=text_key, data=text.encode("utf-8"))
+
+    log_event(
+        logger,
+        "document_extracted",
+        path=normalized_path,
+        artifact_id=artifact_id,
+        char_count=len(text),
+        post_processing=post_processing,
+    )
+
+    note: str | None = None
+    output_text = text
+    output_kind = "extracted"
+    extension = ".txt"
+
+    if post_processing == "clean":
+        correction = correct_text(text)
+        output_text = correction.text
+        note = correction.note
+        output_kind = "clean"
+    elif post_processing == "markdown":
+        correction = correct_text_to_markdown(text)
+        output_text = correction.text
+        note = correction.note
+        output_kind = "markdown"
+        extension = ".md"
+
+    output_key = _join_key(output_kind, artifact_id, f"{safe_stem}{extension}")
+    output_path = store.put_bytes(key=output_key, data=output_text.encode("utf-8"))
+
+    log_event(
+        logger,
+        "document_extract_finished",
+        path=normalized_path,
+        artifact_id=artifact_id,
+        output_path=output_path,
+        post_processing=post_processing,
+    )
 
     response: dict[str, object] = {
         "filename": resolved_filename,
         "source_path": normalized_path,
         "artifact_id": artifact_id,
-        "text_path": text_path,
-        "char_count": len(text),
-        "text_preview": _preview_text(text),
+        "text_path": output_path,
     }
-
-    if export_markdown:
-        markdown = render_markdown_document(
-            filename=resolved_filename,
-            text=text,
-            source_uri=normalized_path,
-            max_chars=settings.document_markdown_chunk_max_chars,
-        )
-        markdown_key = _join_key("markdown", artifact_id, f"{safe_stem}.md")
-        markdown_path = store.put_bytes(key=markdown_key, data=markdown.encode("utf-8"))
-        response["markdown_path"] = markdown_path
-        response["markdown_char_count"] = len(markdown)
-
-    if correct_text:
-        corrected = run_text_correction(text)
-        corrected_key = _join_key("corrected", artifact_id, f"{safe_stem}.txt")
-        corrected_path = store.put_bytes(key=corrected_key, data=corrected.encode("utf-8"))
-        response["corrected_path"] = corrected_path
-        response["corrected_char_count"] = len(corrected)
-        response["corrected_text_preview"] = _preview_text(corrected)
-
+    if note:
+        response["note"] = note
     return response
