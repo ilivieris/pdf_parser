@@ -1,0 +1,10 @@
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.8,<3.0
+pydantic-settings>=2.3,<3.0
+python-dotenv>=1.0,<2.0
+mammoth>=1.8,<2.0
+pdfplumber>=0.11,<1.0
+pdf2image>=1.17,<2.0
+pytesseract>=0.3.10,<1.0
+openai>=1.50,<2.0

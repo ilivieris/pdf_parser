@@ -1,0 +1,16 @@
+services:
+  document-processor-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: document-processor-api:local
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DOCUMENT_STORAGE_ROOT: /app/storage
+    volumes:
+      - ./storage:/app/storage
+      - ./diavgeia_sample:/app/storage/diavgeia_sample:ro
+    restart: unless-stopped
