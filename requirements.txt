@@ -9,3 +9,9 @@ pdf2image>=1.17,<2.0
 pytesseract>=0.3.10,<1.0
 openai>=1.50,<2.0
 tiktoken>=0.7,<1.0
+
+# Only used by app/services/semantic_analysis/ (ESCO skills retrieval) — remove these two
+# lines too if that folder is ever removed. Embeddings themselves come from a remote API
+# (see settings.py), so no local model / torch is needed — just the local vector index.
+faiss-cpu>=1.8,<2.0
+numpy>=1.26,<3.0

@@ -12,5 +12,5 @@ services:
       DOCUMENT_OUTPUT_ROOT: /app/extracted
     volumes:
       - ./extracted:/app/extracted
-      - ./diavgeia_sample:/app/extracted/diavgeia_sample:ro
+      - .:/app/extracted/workspace:ro
     restart: unless-stopped

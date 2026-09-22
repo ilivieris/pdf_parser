@@ -8,7 +8,7 @@ from pathlib import Path
 # provenance/fetch date). Only entries with allowedInDecisions=true are real, assignable
 # types — the rest are grouping categories that can appear as a `parent`, never as a
 # document's own type.
-_REFERENCE_PATH = Path(__file__).with_name("decision_types.json")
+_REFERENCE_PATH = Path(__file__).with_name("data") / "decision_types.json"
 
 
 @lru_cache(maxsize=1)

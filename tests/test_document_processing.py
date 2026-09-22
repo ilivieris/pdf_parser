@@ -93,6 +93,32 @@ def test_diavgeia_pdf_extracts_label_value_table_without_mangling_prose() -> Non
     assert "| - |" not in parsed
 
 
+def test_multi_column_gazette_pages_are_not_misdetected_as_tables() -> None:
+    sample_pdf = Path(__file__).resolve().parents[1] / "diavgeia_sample" / "1.pdf"
+    if not sample_pdf.exists():
+        pytest.skip(f"sample file not present: {sample_pdf}")
+
+    parsed = parse_pdf(sample_pdf)
+
+    # This document is plain two-column gazette body text with no real tables. The strong,
+    # repeated column alignment of a two-column layout must not be misdetected as a table
+    # (which would otherwise split words mid-word at the perceived column boundaries).
+    assert "| --- |" not in parsed
+    assert "ΑΡΙΣΤΟΤΕΛΕΙΟ ΠΑΝΕΠΙΣΤΗΜΙΟ" in parsed
+
+
+def test_bordered_table_is_still_detected_next_to_gazette_style_pages() -> None:
+    sample_pdf = Path(__file__).resolve().parents[1] / "diavgeia_sample" / "2.pdf"
+    if not sample_pdf.exists():
+        pytest.skip(f"sample file not present: {sample_pdf}")
+
+    parsed = parse_pdf(sample_pdf)
+
+    assert "| --- |" in parsed
+    assert "| 58206" in parsed
+    assert "80.849,81" in parsed
+
+
 def test_parse_bytes_rejects_empty_suffix() -> None:
     parser = DocumentParser(supported_extensions=[".txt"])
 

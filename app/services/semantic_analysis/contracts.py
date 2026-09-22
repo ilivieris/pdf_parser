@@ -57,9 +57,16 @@ class DecisionType(BaseModel):
 
 class SkillMatch(BaseModel):
     taxonomy: Literal["ESCO", "DigComp"]
-    label: str = Field(description="Candidate skill/competence label proposed by the model.")
+    label: str = Field(description="The matched taxonomy entry's own official label (not LLM free text).")
     evidence: str = Field(description="Verbatim quote from the document that the model based this match on.")
     confidence: Literal["high", "medium", "low"]
+    source_uri: str | None = Field(
+        default=None,
+        description=(
+            "URI of the matched entry in the source taxonomy (e.g. the ESCO skill concept URI). "
+            "None only if the taxonomy has no bundled index yet (currently: DigComp)."
+        ),
+    )
 
 
 class AnalyzeResponse(BaseModel):
@@ -73,8 +80,12 @@ class AnalyzeResponse(BaseModel):
     budget_codes: list[BudgetCodeMatch]
     skills: list[SkillMatch] = Field(
         description=(
-            "Candidate ESCO/DigComp matches proposed by an LLM. These are NOT validated against the "
-            "official ESCO/DigComp registries — treat them as suggestions to review, not ground truth."
+            "ESCO skill matches: an LLM extracts a free-text skill description from the document, "
+            "semantic search retrieves candidate ESCO entries from a local FAISS index built from the "
+            "real ESCO taxonomy, and the LLM selects which retrieved candidates actually apply — so "
+            "every label/source_uri here is a real ESCO entry, not free-form LLM text. DigComp is not "
+            "covered yet (see skills_note): the DigComp-to-ESCO mapping is only published in ESCO's "
+            "gated bulk-download bundle, which needs a human to complete an email-verification step."
         )
     )
     extraction_note: str | None = Field(

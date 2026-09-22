@@ -2,7 +2,7 @@ from pathlib import Path
 import requests
 
 # Ρυθμίσεις
-PDF_DIR = Path("diavgeia_sample/pdf")
+PDF_DIR = Path("diavgeia_sample/test")
 ENDPOINT = "http://localhost:8000/extract"
 
 

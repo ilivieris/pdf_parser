@@ -225,6 +225,12 @@ def _escape_markdown_cell(value: str) -> str:
     return value.replace("|", "\\|")
 
 
+# Multi-column, newspaper-style body text (very common in ΦΕΚ/Diavgeia PDFs) produces the
+# exact same strong, repeated column alignment as a real table — one "row" per line of prose,
+# for the whole page. Genuine borderless label/value tables stay well under this in practice.
+_MAX_TEXT_STRATEGY_TABLE_ROWS = 20
+
+
 def _find_tables(page):
     # Bordered tables first (ruling lines); Diavgeia-style documents are often
     # borderless, so fall back to alignment-based detection when that finds nothing.
@@ -234,9 +240,11 @@ def _find_tables(page):
     tables = page.find_tables()
     if tables:
         return tables
-    return page.find_tables(
+
+    candidates = page.find_tables(
         table_settings={"vertical_strategy": "text", "horizontal_strategy": "text", "min_words_vertical": 20}
     )
+    return [t for t in candidates if len(t.rows) <= _MAX_TEXT_STRATEGY_TABLE_ROWS]
 
 
 def _table_to_markdown(rows: list[list[str | None]]) -> str:
