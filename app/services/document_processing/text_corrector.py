@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from threading import Lock
 
@@ -14,50 +14,57 @@ from document_processor_service.app.services.document_processing.exceptions impo
 
 logger = get_logger("services.document_processor_service.text_corrector")
 
-_GUARDRAILS = (
-    "Μην αλλάξεις το νόημα, μην προσθέσεις ή αφαιρέσεις πληροφορίες, αριθμούς, ημερομηνίες, "
-    "ονόματα, κωδικούς (π.χ. ΑΔΑ) ή ποσά. Διατήρησε την αρχική γλώσσα του κειμένου.\n\n"
-    "ΚΡΙΣΙΜΟ: το κείμενο εισόδου μπορεί να είναι πολύ μεγάλο ή να περιέχει πολλές παρόμοιες/"
-    "επαναλαμβανόμενες καταχωρήσεις (π.χ. λίστες αποφάσεων, ΦΕΚ). Πρέπει να διορθώσεις και να "
-    "επιστρέψεις ΟΛΟΚΛΗΡΟ το κείμενο, μέχρι το τέλος του, χωρίς καμία περίληψη, συντόμευση ή "
-    "παράλειψη — ακόμα κι αν φαίνεται επαναλαμβανόμενο. Μην γράψεις ποτέ σημειώσεις τύπου "
-    "'[συνεχίζεται...]', '...' ή οτιδήποτε υποδηλώνει ότι παρέλειψες μέρος του κειμένου."
+# The input is always presented as a complete, self-contained document. Telling the model it is
+# looking at "part of a larger text" is what invites it to answer with a "the rest continues..."
+# note instead of the actual content. The output contract anchors both ends of the output to the
+# input, which is what actually stops the model from trailing off mid-document.
+_ROLE = (
+    "Είσαι συνάρτηση μετασχηματισμού κειμένου, όχι συνομιλητής. Η έξοδός σου είναι το κείμενο της "
+    "εισόδου διορθωμένο — τίποτα άλλο.\n\n"
+    "Το κείμενο που λαμβάνεις είναι αυτοτελές και ολοκληρωμένο. Δεν υπάρχει άλλο κείμενο πριν ή "
+    "μετά από αυτό, και δεν πρόκειται να σου ζητηθεί συνέχεια. Η έξοδός σου γράφεται αυτόματα σε "
+    "αρχείο που παραδίδεται ως επίσημο έγγραφο, χωρίς να τη δει άνθρωπος ενδιάμεσα."
+)
+
+_OUTPUT_CONTRACT = (
+    "ΣΥΜΒΟΛΑΙΟ ΕΞΟΔΟΥ — ισχύει χωρίς εξαίρεση:\n"
+    "1. Η πρώτη λέξη της εξόδου σου είναι η πρώτη λέξη της εισόδου, διορθωμένη.\n"
+    "2. Η τελευταία λέξη της εξόδου σου είναι η τελευταία λέξη της εισόδου, διορθωμένη.\n"
+    "3. Ανάμεσά τους υπάρχει κάθε πρόταση, παράγραφος, άρθρο και καταχώρηση της εισόδου, με την "
+    "ίδια σειρά. Τα διοικητικά κείμενα έχουν πολλές σχεδόν πανομοιότυπες καταχωρήσεις· καμία δεν "
+    "συγχωνεύεται, καμία δεν συντομεύεται, καμία δεν παραλείπεται.\n"
+    "4. Δεν γράφεις ΠΟΤΕ κείμενο που περιγράφει τι έκανες, τι ακολουθεί ή τι παρέλειψες. "
+    "Απαγορεύονται ρητά: φράσεις μέσα σε αγκύλες [ ], σχόλια, εισαγωγή, επίλογος, περίληψη, "
+    "αποσιωπητικά που αντικαθιστούν περιεχόμενο, οδηγίες προς τον αναγνώστη.\n"
+    "5. Αν πιάσεις τον εαυτό σου να περιγράφει τη διαδικασία αντί να την εκτελεί, σταμάτα και "
+    "γράψε το πραγματικό κείμενο της εισόδου."
+)
+
+_CONSTRAINTS = (
+    "ΔΕΝ ΑΛΛΑΖΕΙΣ: το νόημα, τους αριθμούς, τις ημερομηνίες, τα ονόματα, τους κωδικούς (π.χ. ΑΔΑ), "
+    "τα ποσά, τη σειρά του περιεχομένου, τη γλώσσα του κειμένου."
 )
 
 _CLEAN_SYSTEM_PROMPT = (
-    "Είσαι διορθωτής κειμένων που έχουν εξαχθεί αυτόματα από PDF/OCR. "
-    "Λαμβάνεις ένα κείμενο (ή τμήμα ενός μεγαλύτερου κειμένου) που μπορεί να έχει "
-    "ορθογραφικά και συντακτικά λάθη, σπασμένες προτάσεις λόγω αναδίπλωσης γραμμών, "
-    "και κακή στοίχιση/μορφοποίηση.\n\n"
-    "Κάνε τα εξής:\n"
-    "1. Διόρθωσε ορθογραφικά και συντακτικά λάθη.\n"
-    "2. Βελτίωσε τη στοίχιση και τη μορφοποίηση (παραγράφους, κενά, δομή) ώστε το κείμενο "
-    "να διαβάζεται καθαρά.\n\n"
-    f"{_GUARDRAILS} "
-    "Επίστρεψε μόνο το διορθωμένο κείμενο, χωρίς πρόσθετα σχόλια."
+    f"{_ROLE}\n\n"
+    "ΔΙΟΡΘΩΣΕΙΣ ΠΟΥ ΚΑΝΕΙΣ (το κείμενο προέρχεται από εξαγωγή PDF/OCR):\n"
+    "1. Ορθογραφικά και συντακτικά λάθη.\n"
+    "2. Λέξεις και προτάσεις που έσπασαν από την αναδίπλωση γραμμών του PDF.\n"
+    "3. Στοίχιση και παραγράφους, ώστε το κείμενο να διαβάζεται καθαρά.\n\n"
+    f"{_CONSTRAINTS}\n\n"
+    f"{_OUTPUT_CONTRACT}"
 )
 
 _MARKDOWN_SYSTEM_PROMPT = (
-    "Είσαι διορθωτής κειμένων που έχουν εξαχθεί αυτόματα από PDF/OCR. "
-    "Λαμβάνεις ένα κείμενο (ή τμήμα ενός μεγαλύτερου κειμένου) που μπορεί να έχει "
-    "ορθογραφικά και συντακτικά λάθη, σπασμένες προτάσεις λόγω αναδίπλωσης γραμμών, "
-    "και κακή στοίχιση/μορφοποίηση.\n\n"
-    "Κάνε τα εξής:\n"
-    "1. Διόρθωσε ορθογραφικά και συντακτικά λάθη.\n"
-    "2. Μορφοποίησε το αποτέλεσμα σε καθαρό Markdown: χρησιμοποίησε επικεφαλίδες (#, ##), "
-    "παραγράφους, λίστες (-, 1.) και πίνακες (| ... |) όπου ταιριάζει στη δομή του πρωτότυπου εγγράφου.\n\n"
-    f"{_GUARDRAILS} "
-    "Επίστρεψε μόνο το Markdown κείμενο, χωρίς πρόσθετα σχόλια και χωρίς code fences (```)."
+    f"{_ROLE}\n\n"
+    "ΔΙΟΡΘΩΣΕΙΣ ΠΟΥ ΚΑΝΕΙΣ (το κείμενο προέρχεται από εξαγωγή PDF/OCR):\n"
+    "1. Ορθογραφικά και συντακτικά λάθη.\n"
+    "2. Λέξεις και προτάσεις που έσπασαν από την αναδίπλωση γραμμών του PDF.\n"
+    "3. Μορφοποίηση σε καθαρό Markdown: επικεφαλίδες (#, ##), παραγράφους, λίστες (-, 1.) και "
+    "πίνακες (| ... |) όπου ταιριάζει στη δομή του εγγράφου. Χωρίς code fences (```).\n\n"
+    f"{_CONSTRAINTS}\n\n"
+    f"{_OUTPUT_CONTRACT}"
 )
-
-# Leaves headroom under settings.max_tokens for the corrected output of each chunk,
-# since chat completions cap output tokens, not input tokens.
-_CHUNK_SAFETY_FACTOR = 0.8
-
-# If a correction comes back shorter than this fraction of the input, the model most likely
-# summarized/truncated instead of correcting the full text — treat it as a failure rather than
-# silently returning an incomplete document.
-_MIN_OUTPUT_LENGTH_RATIO = 0.6
 
 
 @dataclass
@@ -136,7 +143,7 @@ def _correct_chunk(chunk: str, system_prompt: str) -> str:
         response = _get_client().chat.completions.create(
             model=settings.openai_model,
             max_tokens=settings.max_tokens,
-            temperature=0.2,
+            temperature=0.0,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": chunk},
@@ -145,16 +152,43 @@ def _correct_chunk(chunk: str, system_prompt: str) -> str:
     except OpenAIError as exc:
         raise TextCorrectionError(f"OpenAI request failed: {exc}") from exc
 
-    corrected = (response.choices[0].message.content or "").strip()
-    if not corrected:
-        raise TextCorrectionError("OpenAI returned an empty correction.")
-    if len(corrected) < _MIN_OUTPUT_LENGTH_RATIO * len(chunk):
-        raise TextCorrectionError(
-            f"OpenAI returned a suspiciously short result ({len(corrected)} chars vs "
-            f"{len(chunk)} chars input) — it likely summarized or truncated instead of "
-            "correcting the full text."
-        )
-    return corrected
+    choice = response.choices[0]
+    usage = response.usage
+    log_event(
+        logger,
+        "text_correction_chunk_done",
+        finish_reason=choice.finish_reason,
+        prompt_tokens=getattr(usage, "prompt_tokens", None),
+        completion_tokens=getattr(usage, "completion_tokens", None),
+    )
+    return (choice.message.content or "").strip()
+
+
+def _correct_chunks_in_parallel(chunks: list[str], system_prompt: str, *, log_label: str) -> list[str]:
+    total = len(chunks)
+    workers = min(total, max(1, settings.document_correction_chunk_parallelism))
+    results: list[str | None] = [None] * total
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {}
+        for index, chunk in enumerate(chunks):
+            future = pool.submit(_correct_chunk, chunk, system_prompt)
+            futures[future] = index
+            log_event(logger, "text_correction_chunk_sending", mode=log_label, chunk=index + 1, total=total)
+
+        for received, future in enumerate(as_completed(futures), start=1):
+            index = futures[future]
+            results[index] = future.result()
+            log_event(
+                logger,
+                "text_correction_chunk_received",
+                mode=log_label,
+                chunk=index + 1,
+                total=total,
+                received=received,
+            )
+
+    return results  # type: ignore[return-value]
 
 
 def _run(text: str, system_prompt: str, *, log_label: str) -> CorrectionResult:
@@ -175,21 +209,23 @@ def _run(text: str, system_prompt: str, *, log_label: str) -> CorrectionResult:
         log_event(logger, "text_correction_skipped", mode=log_label, token_count=token_count, limit=hard_limit)
         return CorrectionResult(text=text, note=note)
 
-    if token_count <= max_tokens:
-        chunks = [text]
-    else:
-        chunk_budget = max(1, int(max_tokens * _CHUNK_SAFETY_FACTOR))
-        chunks = _split_into_chunks(text, chunk_budget)
+    chunk_budget = max(1, settings.document_chunk_tokens)
+    chunks = [text] if token_count <= chunk_budget else _split_into_chunks(text, chunk_budget)
 
-    log_event(logger, "text_correction_started", mode=log_label, token_count=token_count, chunk_count=len(chunks))
+    log_event(
+        logger,
+        "text_correction_started",
+        mode=log_label,
+        token_count=token_count,
+        chunk_budget=chunk_budget,
+        chunk_count=len(chunks),
+    )
 
     try:
         if len(chunks) == 1:
             corrected_chunks = [_correct_chunk(chunks[0], system_prompt)]
         else:
-            workers = min(len(chunks), max(1, settings.document_correction_chunk_parallelism))
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                corrected_chunks = list(pool.map(lambda c: _correct_chunk(c, system_prompt), chunks))
+            corrected_chunks = _correct_chunks_in_parallel(chunks, system_prompt, log_label=log_label)
     except TextCorrectionError as exc:
         note = f"Text correction failed, returning the original extracted text instead: {exc}"
         log_event(

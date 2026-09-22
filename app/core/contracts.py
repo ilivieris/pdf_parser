@@ -22,8 +22,6 @@ class ExtractRequest(BaseModel):
 
 class ExtractResponse(BaseModel):
     filename: str
-    source_path: str
-    artifact_id: str
     text_path: str
     note: str | None = Field(
         default=None,

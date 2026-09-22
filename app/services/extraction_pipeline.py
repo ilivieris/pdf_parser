@@ -79,16 +79,12 @@ def extract_document_from_local(
     log_event(
         logger,
         "document_extract_finished",
-        path=normalized_path,
-        artifact_id=artifact_id,
         output_path=output_path,
         post_processing=post_processing,
     )
 
     response: dict[str, object] = {
         "filename": Path(normalized_path).name or "document.bin",
-        "source_path": normalized_path,
-        "artifact_id": artifact_id,
         "text_path": output_path,
     }
     if note:

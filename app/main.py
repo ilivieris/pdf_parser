@@ -14,22 +14,22 @@ from document_processor_service.app.services.document_processing.exceptions impo
     TextCorrectionError,
     UnsupportedFormatError,
 )
-# Self-contained under app/services/semantic_analysis/ — remove this import, the
-# app.include_router(...) call and the startup handler below to drop /analyze entirely.
-from document_processor_service.app.services.semantic_analysis.router import router as semantic_analysis_router
-from document_processor_service.app.services.semantic_analysis.startup import ensure_skills_index_ready
+# # Self-contained under app/services/semantic_analysis/ — remove this import, the
+# # app.include_router(...) call and the startup handler below to drop /analyze entirely.
+# from document_processor_service.app.services.semantic_analysis.router import router as semantic_analysis_router
+# from document_processor_service.app.services.semantic_analysis.startup import ensure_skills_index_ready
 
 app = FastAPI(title="Document Processor Service", version="0.2.0")
 logger = get_logger("services.document_processor_service")
 _extraction_limiter = anyio.CapacityLimiter(max(1, settings.document_extraction_workers))
-app.include_router(semantic_analysis_router)
+# app.include_router(semantic_analysis_router)
 
 
-@app.on_event("startup")
-async def _build_skills_index_on_startup() -> None:
-    # Blocks the app from accepting requests until the ESCO skills index is ready (building it
-    # from scratch takes several minutes the first time; instant on later restarts).
-    await anyio.to_thread.run_sync(ensure_skills_index_ready)
+# @app.on_event("startup")
+# async def _build_skills_index_on_startup() -> None:
+#     # Blocks the app from accepting requests until the ESCO skills index is ready (building it
+#     # from scratch takes several minutes the first time; instant on later restarts).
+#     await anyio.to_thread.run_sync(ensure_skills_index_ready)
 
 
 @app.get("/health")

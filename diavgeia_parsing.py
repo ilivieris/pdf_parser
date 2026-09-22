@@ -13,11 +13,14 @@ def find_pdfs(directory: Path) -> list[Path]:
 
 def extract_pdf(pdf_path: Path):
     """Στέλνει ένα PDF στο extraction endpoint."""
-    # Κρατάμε το path σε μορφή που ταιριάζει με το curl example
-    path_for_api = pdf_path.as_posix()
+    # docker-compose.yml κάνει mount ολόκληρο το repo root στο
+    # /app/extracted/workspace, άρα τα paths πρέπει να έχουν αυτό το prefix
+    # για να επιλυθούν σωστά μέσα στο container (DOCUMENT_OUTPUT_ROOT=/app/extracted).
+    path_for_api = f"workspace/{pdf_path.as_posix()}"
 
     payload = {
-        "path": path_for_api
+        "path": path_for_api,
+        "post_processing": "clean"
     }
 
     response = requests.post(

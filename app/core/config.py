@@ -27,7 +27,13 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1"
     max_tokens: int = 4096
-    document_correction_chunk_parallelism: int = 4
+    document_correction_chunk_parallelism: int = 10
+    # Per-chunk input budget in tokens, far below the model's output cap: faithful reproduction
+    # degrades into silently dropping content long before that cap is reached. Measured on real
+    # Diavgeia/FEK text with gpt-4.1: sizes up to 12000 reproduced every sampled region in full,
+    # while 14000+ intermittently stopped a third of the way through (finish_reason still "stop",
+    # no placeholder -- the drop is silent). 8000 keeps a margin under that threshold.
+    document_chunk_tokens: int = 8000
 
 
 settings = Settings()

@@ -93,10 +93,17 @@ def test_diavgeia_pdf_extracts_label_value_table_without_mangling_prose() -> Non
     assert "| - |" not in parsed
 
 
+def _find_diavgeia_sample(name: str) -> Path | None:
+    root = Path(__file__).resolve().parents[1] / "diavgeia_sample"
+    if not root.is_dir():
+        return None
+    return next((p for p in root.rglob(name)), None)
+
+
 def test_multi_column_gazette_pages_are_not_misdetected_as_tables() -> None:
-    sample_pdf = Path(__file__).resolve().parents[1] / "diavgeia_sample" / "1.pdf"
-    if not sample_pdf.exists():
-        pytest.skip(f"sample file not present: {sample_pdf}")
+    sample_pdf = _find_diavgeia_sample("1.pdf")
+    if sample_pdf is None:
+        pytest.skip("sample file '1.pdf' not present under diavgeia_sample")
 
     parsed = parse_pdf(sample_pdf)
 
@@ -108,9 +115,9 @@ def test_multi_column_gazette_pages_are_not_misdetected_as_tables() -> None:
 
 
 def test_bordered_table_is_still_detected_next_to_gazette_style_pages() -> None:
-    sample_pdf = Path(__file__).resolve().parents[1] / "diavgeia_sample" / "2.pdf"
-    if not sample_pdf.exists():
-        pytest.skip(f"sample file not present: {sample_pdf}")
+    sample_pdf = _find_diavgeia_sample("2.pdf")
+    if sample_pdf is None:
+        pytest.skip("sample file '2.pdf' not present under diavgeia_sample")
 
     parsed = parse_pdf(sample_pdf)
 
@@ -179,14 +186,11 @@ def test_output_path_is_flat_artifact_id_with_mode_specific_suffix(
     monkeypatch.setattr(extraction_pipeline, "correct_text", lambda text: CorrectionResult(text=text))
     monkeypatch.setattr(extraction_pipeline, "correct_text_to_markdown", lambda text: CorrectionResult(text=text))
 
-    result = extraction_pipeline.extract_document_from_local(
-        path="documents/v1/r45.pdf", post_processing=post_processing
-    )
+    extraction_pipeline.extract_document_from_local(path="documents/v1/r45.pdf", post_processing=post_processing)
 
-    artifact_id = result["artifact_id"]
-    expected_key = f"{artifact_id}{expected_suffix}"
-    assert list(store.writes.keys()) == [expected_key]
-    assert "/" not in expected_key  # no nested subfolders
+    written_key = next(iter(store.writes))
+    assert written_key.endswith(expected_suffix)
+    assert "/" not in written_key  # no nested subfolders
 
 
 def test_extract_with_clean_post_processing_writes_corrected_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,7 +217,7 @@ def test_extract_with_clean_post_processing_writes_corrected_output(monkeypatch:
     result = extraction_pipeline.extract_document_from_local(path="a.txt", post_processing="clean")
 
     written_key = next(iter(store.writes))
-    assert written_key == f"{result['artifact_id']}_clean.txt"
+    assert written_key.endswith("_clean.txt")
     assert store.writes[written_key] == b"CORRECTED"
     assert "note" not in result
 
@@ -248,7 +252,7 @@ def test_extract_with_markdown_post_processing_uses_its_own_correction_call(monk
     result = extraction_pipeline.extract_document_from_local(path="a.txt", post_processing="markdown")
 
     written_key = next(iter(store.writes))
-    assert written_key == f"{result['artifact_id']}.md"
+    assert written_key.endswith(".md")
     assert store.writes[written_key] == b"# CORRECTED MARKDOWN"
     assert result["text_path"].endswith(".md")
 
@@ -289,18 +293,27 @@ def test_correct_text_raises_when_api_key_missing(monkeypatch: pytest.MonkeyPatc
         text_corrector.correct_text("some text")
 
 
-def test_correct_chunk_raises_when_result_is_suspiciously_short(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_correct_chunk_sends_one_request_and_returns_the_model_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+
     class FakeMessage:
-        content = "short."
+        content = "  corrected text  "
 
     class FakeChoice:
         message = FakeMessage()
+        finish_reason = "stop"
+
+    class FakeUsage:
+        prompt_tokens = 10
+        completion_tokens = 5
 
     class FakeResponse:
         choices = [FakeChoice()]
+        usage = FakeUsage()
 
     class FakeCompletions:
         def create(self, **kwargs: object) -> FakeResponse:
+            calls.append(kwargs)
             return FakeResponse()
 
     class FakeChat:
@@ -311,10 +324,10 @@ def test_correct_chunk_raises_when_result_is_suspiciously_short(monkeypatch: pyt
 
     monkeypatch.setattr(text_corrector, "_get_client", lambda: FakeClient())
 
-    long_chunk = "word " * 200
+    result = text_corrector._correct_chunk("some input text", "system prompt")
 
-    with pytest.raises(TextCorrectionError):
-        text_corrector._correct_chunk(long_chunk, "system prompt")
+    assert result == "corrected text"
+    assert len(calls) == 1  # no retries
 
 
 def test_correct_text_falls_back_to_original_text_when_the_llm_call_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -337,7 +350,7 @@ def test_correct_text_falls_back_to_original_text_when_one_of_several_chunks_fai
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "openai_api_key", "test-key")
-    monkeypatch.setattr(settings, "max_tokens", 10)
+    monkeypatch.setattr(settings, "document_chunk_tokens", 10)
     monkeypatch.setattr(text_corrector, "_count_tokens", lambda text: 25)
     monkeypatch.setattr(text_corrector, "_split_into_chunks", lambda text, budget: ["one", "two", "three"])
 
@@ -374,7 +387,7 @@ def test_correct_text_skips_when_over_ten_times_max_tokens(monkeypatch: pytest.M
 
 def test_correct_text_splits_into_parallel_chunks_and_preserves_order(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "openai_api_key", "test-key")
-    monkeypatch.setattr(settings, "max_tokens", 10)
+    monkeypatch.setattr(settings, "document_chunk_tokens", 10)
     monkeypatch.setattr(text_corrector, "_count_tokens", lambda text: 25)
     monkeypatch.setattr(text_corrector, "_split_into_chunks", lambda text, budget: ["one", "two", "three"])
     monkeypatch.setattr(text_corrector, "_correct_chunk", lambda chunk, system_prompt: chunk.upper())
@@ -409,6 +422,34 @@ def test_split_into_chunks_respects_token_budget() -> None:
 
     assert len(chunks) >= 2
     assert "".join(chunks).replace("\n\n", "") == text.replace("\n\n", "")
+
+
+def test_split_into_chunks_fills_chunks_up_to_the_budget() -> None:
+    """Paragraphs are packed, not sent one per chunk.
+
+    A budget that fits several paragraphs must produce correspondingly fewer chunks --
+    otherwise a large document explodes into hundreds of needless OpenAI calls.
+    """
+    paragraph = "Παράγραφος με αρκετό κείμενο ώστε να μετρηθεί σε tokens."
+    text = "\n\n".join([paragraph] * 40)
+
+    small = text_corrector._split_into_chunks(text, max_tokens_per_chunk=40)
+    large = text_corrector._split_into_chunks(text, max_tokens_per_chunk=200)
+
+    assert len(large) < len(small)
+    for chunk in large:
+        assert text_corrector._count_tokens(chunk) <= 200
+    assert "".join(large).replace("\n\n", "") == text.replace("\n\n", "")
+
+
+def test_default_chunk_budget_stays_below_the_measured_safe_ceiling() -> None:
+    """gpt-4.1 silently drops content at 14000+ input tokens per chunk (see README).
+
+    Raising the default past 12000 reintroduces that failure, and it is invisible at
+    runtime -- finish_reason stays "stop" and no placeholder is emitted -- so guard the
+    default here instead.
+    """
+    assert 0 < settings.document_chunk_tokens <= 12000
 
 
 def test_extract_endpoint_sanitizes_extraction_errors(monkeypatch: pytest.MonkeyPatch) -> None:
