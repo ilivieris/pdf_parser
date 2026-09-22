@@ -9,14 +9,6 @@ PostProcessing = Literal["none", "clean", "markdown"]
 
 class ExtractRequest(BaseModel):
     path: str = Field(description="Path to the source file, resolved on the server's local disk.")
-    filename: str | None = Field(
-        default=None,
-        description=(
-            "Optional filename hint used to pick the parser and name the output file. "
-            "Only needed when `path` itself has no file extension; if provided together with "
-            "an extension in `path`, the extensions must match."
-        ),
-    )
     post_processing: PostProcessing = Field(
         default="none",
         description=(

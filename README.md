@@ -9,15 +9,14 @@ Minimal document-processing API for the chatbot template.
 
 ## Contract
 
-- `/extract` loads a file from local disk using `path`. `path` may be an absolute filesystem path, or a path relative to `DOCUMENT_OUTPUT_ROOT`.
+- `/extract` loads a file from local disk using `path`. `path` may be an absolute filesystem path, or a path relative to `DOCUMENT_OUTPUT_ROOT`. The file's extension (from `path` itself) picks the parser — there is no separate `filename` override.
 - When running via Docker Compose, `path` is resolved **inside the container**, so the source file must be reachable through a mounted volume (see `docker-compose.yml`).
-- `filename` is optional. It's only needed when `path` itself has no file extension (some Diavgeia-style keys don't); it tells the parser which format to use and names the output file. If `path` already has an extension and `filename` is also given, their extensions must match.
 - Supported extraction formats are `PDF`, `DOCX`, `DOC`, and text-like files listed in `core/config.py`.
-- `post_processing` controls what gets written back to disk (under `DOCUMENT_OUTPUT_ROOT`):
-  - `none` (default): the raw extracted text, as-is.
-  - `clean`: the text is sent to the configured OpenAI model to fix spelling/grammar and improve layout, output as plain text.
-  - `markdown`: the text is sent to the configured OpenAI model with its own prompt that fixes spelling/grammar **and** formats the result as markdown in a single pass — it's an independent correction call, not `clean` followed by a markdown conversion step.
-- If a `clean`/`markdown` request's text is too large for the configured OpenAI model (see "Large documents" below), correction is skipped and the response's `note` field explains why; the raw extracted text is returned instead.
+- `post_processing` controls what gets written back to disk, as a single flat file directly under `DOCUMENT_OUTPUT_ROOT` — no subfolders. The file is named after `artifact_id` (a content hash), not the source filename:
+  - `none` (default): the raw extracted text, as-is, written to `{DOCUMENT_OUTPUT_ROOT}/{artifact_id}.txt`.
+  - `clean`: the text is sent to the configured OpenAI model to fix spelling/grammar and improve layout, written to `{DOCUMENT_OUTPUT_ROOT}/{artifact_id}_clean.txt`.
+  - `markdown`: the text is sent to the configured OpenAI model with its own prompt that fixes spelling/grammar **and** formats the result as markdown in a single pass (an independent correction call, not `clean` followed by a markdown conversion step), written to `{DOCUMENT_OUTPUT_ROOT}/{artifact_id}.md`.
+- If a `clean`/`markdown` request's text is too large for the configured OpenAI model (see "Large documents" below) or the correction call fails, the raw extracted text is written instead and the response's `note` field explains why.
 - Extraction failures return an error instead of silently writing empty output.
 
 ## Large Documents And Chunking
@@ -81,7 +80,7 @@ Result from the current minimal pipeline:
 
 - Extract: `char_count=212396`
 - Extract text preview starts with the table of contents in Greek as expected
-- Markdown export: `extracted/markdown/790ff7612eeff714/notes.md`
+- Markdown export: `extracted/790ff7612eeff714.md`
 
 Docling status in this runtime:
 
@@ -123,9 +122,10 @@ Invoke-RestMethod `
 
 Response fields:
 
-- `filename`, `source_path`, `artifact_id`
-- `text_path` — where the (raw/clean/markdown) output was written
-- `note` — present only when something noteworthy happened, e.g. correction was skipped for being too large
+- `filename` — basename of `path`
+- `source_path`, `artifact_id`
+- `text_path` — where the (raw/clean/markdown) output was written, e.g. `{DOCUMENT_OUTPUT_ROOT}/{artifact_id}.md`
+- `note` — present only when something noteworthy happened, e.g. correction was skipped for being too large, or the correction call failed and the raw text was written instead
 
 ## Environment Variables
 

@@ -100,7 +100,7 @@ def test_parse_bytes_rejects_empty_suffix() -> None:
         parser.parse_bytes(b"hello", "")
 
 
-def test_extract_uses_path_suffix_when_filename_has_no_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_extract_uses_path_suffix_to_pick_the_parser(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeStore:
         def get_bytes(self, path: str) -> bytes:
             return b"doc bytes"
@@ -119,18 +119,48 @@ def test_extract_uses_path_suffix_when_filename_has_no_suffix(monkeypatch: pytes
     monkeypatch.setattr(extraction_pipeline, "get_local_store", lambda: FakeStore())
     monkeypatch.setattr(extraction_pipeline, "DocumentParser", lambda: parser)
 
-    result = extraction_pipeline.extract_document_from_local(
-        path="raw/artifact/source.doc",
-        filename="notes",
-    )
+    result = extraction_pipeline.extract_document_from_local(path="raw/artifact/source.doc")
 
     assert parser.suffixes == [".doc"]
-    assert result["filename"] == "notes"
+    assert result["filename"] == "source.doc"
 
 
-def test_validate_filename_hint_rejects_mismatched_suffix() -> None:
-    with pytest.raises(ValueError):
-        extraction_pipeline._validate_filename_hint("raw/a/source.doc", "source.pdf")
+@pytest.mark.parametrize(
+    ("post_processing", "expected_suffix"),
+    [("none", ".txt"), ("clean", "_clean.txt"), ("markdown", ".md")],
+)
+def test_output_path_is_flat_artifact_id_with_mode_specific_suffix(
+    monkeypatch: pytest.MonkeyPatch, post_processing: str, expected_suffix: str
+) -> None:
+    class FakeStore:
+        def __init__(self) -> None:
+            self.writes: dict[str, bytes] = {}
+
+        def get_bytes(self, path: str) -> bytes:
+            return b"doc bytes"
+
+        def put_bytes(self, *, key: str, data: bytes) -> str:
+            self.writes[key] = data
+            return f"/storage/{key}"
+
+    class FakeParser:
+        def parse_bytes(self, data: bytes, suffix: str) -> str:
+            return "text"
+
+    store = FakeStore()
+    monkeypatch.setattr(extraction_pipeline, "get_local_store", lambda: store)
+    monkeypatch.setattr(extraction_pipeline, "DocumentParser", lambda: FakeParser())
+    monkeypatch.setattr(extraction_pipeline, "correct_text", lambda text: CorrectionResult(text=text))
+    monkeypatch.setattr(extraction_pipeline, "correct_text_to_markdown", lambda text: CorrectionResult(text=text))
+
+    result = extraction_pipeline.extract_document_from_local(
+        path="documents/v1/r45.pdf", post_processing=post_processing
+    )
+
+    artifact_id = result["artifact_id"]
+    expected_key = f"{artifact_id}{expected_suffix}"
+    assert list(store.writes.keys()) == [expected_key]
+    assert "/" not in expected_key  # no nested subfolders
 
 
 def test_extract_with_clean_post_processing_writes_corrected_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,7 +187,7 @@ def test_extract_with_clean_post_processing_writes_corrected_output(monkeypatch:
     result = extraction_pipeline.extract_document_from_local(path="a.txt", post_processing="clean")
 
     written_key = next(iter(store.writes))
-    assert written_key.startswith("clean/")
+    assert written_key == f"{result['artifact_id']}_clean.txt"
     assert store.writes[written_key] == b"CORRECTED"
     assert "note" not in result
 
@@ -192,8 +222,7 @@ def test_extract_with_markdown_post_processing_uses_its_own_correction_call(monk
     result = extraction_pipeline.extract_document_from_local(path="a.txt", post_processing="markdown")
 
     written_key = next(iter(store.writes))
-    assert written_key.startswith("markdown/")
-    assert written_key.endswith(".md")
+    assert written_key == f"{result['artifact_id']}.md"
     assert store.writes[written_key] == b"# CORRECTED MARKDOWN"
     assert result["text_path"].endswith(".md")
 
@@ -386,7 +415,3 @@ def test_local_store_round_trips_bytes_through_put_and_get(tmp_path: Path) -> No
     assert Path(stored_path).read_bytes() == b"hello"
     assert store.get_bytes(stored_path) == b"hello"
     assert store.get_bytes("raw/artifact/example.txt") == b"hello"
-
-
-def test_safe_filename_strips_path_and_normalizes_separators() -> None:
-    assert extraction_pipeline._safe_filename("../nested/my report.txt") == "my-report.txt"

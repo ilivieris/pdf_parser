@@ -14,10 +14,14 @@ from document_processor_service.app.services.document_processing.exceptions impo
     TextCorrectionError,
     UnsupportedFormatError,
 )
+# Self-contained under app/services/semantic_analysis/ — remove this import and the
+# app.include_router(...) call below to drop the /analyze endpoint entirely.
+from document_processor_service.app.services.semantic_analysis.router import router as semantic_analysis_router
 
 app = FastAPI(title="Document Processor Service", version="0.2.0")
 logger = get_logger("services.document_processor_service")
 _extraction_limiter = anyio.CapacityLimiter(max(1, settings.document_extraction_workers))
+app.include_router(semantic_analysis_router)
 
 
 @app.get("/health")
@@ -34,7 +38,6 @@ async def extract_document(payload: ExtractRequest) -> ExtractResponse:
             lambda: extract_document_from_local(
                 path=payload.path,
                 post_processing=payload.post_processing,
-                filename=payload.filename,
             ),
             limiter=_extraction_limiter,
         )
