@@ -8,4 +8,11 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    volumes:
+      # Keeps the ESCO skills index across container recreations. Without it the startup hook
+      # rebuilds all ~13k vectors on every `up --build`, blocking the API for several minutes.
+      - esco-index:/app/document_processor_service/app/services/semantic_analysis/data
     restart: unless-stopped
+
+volumes:
+  esco-index:

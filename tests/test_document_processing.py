@@ -759,3 +759,135 @@ def test_remove_object_treats_a_missing_object_as_success() -> None:
     store._client = FakeClient()
 
     store.remove_object("sources/abc/1.pdf")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# /analyze -- upload-based, parsed in memory, nothing stored
+# ---------------------------------------------------------------------------
+
+
+def _stub_semantic_calls(monkeypatch: pytest.MonkeyPatch, text: str = "κείμενο") -> None:
+    """Neutralises the network-bound halves of the analyse pipeline."""
+    from document_processor_service.app.services.semantic_analysis import pipeline
+
+    monkeypatch.setattr(pipeline, "DocumentParser", lambda: FakeParser(text))
+    monkeypatch.setattr(pipeline, "extract_cpv", lambda t: [])
+    monkeypatch.setattr(pipeline, "extract_budget_codes", lambda t: [])
+    monkeypatch.setattr(
+        pipeline,
+        "extract_llm_fields",
+        lambda t: {"decision_type": None, "cpv": [], "budget_codes": []},
+    )
+    monkeypatch.setattr(pipeline, "extract_skills", lambda t: [])
+
+
+def test_analyze_parses_the_uploaded_bytes_without_touching_the_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from document_processor_service.app.services.semantic_analysis import pipeline
+
+    seen: list[tuple[bytes, str]] = []
+
+    class RecordingParser(FakeParser):
+        def parse_bytes(self, data: bytes, suffix: str) -> str:
+            seen.append((data, suffix))
+            return super().parse_bytes(data, suffix)
+
+    _stub_semantic_calls(monkeypatch)
+    monkeypatch.setattr(pipeline, "DocumentParser", lambda: RecordingParser("κείμενο"))
+
+    # Any real file read would blow up here, since this name exists nowhere.
+    result = pipeline.analyze_document_from_upload(filename="ουδέποτε-υπήρξε.txt", data=b"raw bytes")
+
+    assert seen == [(b"raw bytes", ".txt")]
+    assert result["filename"] == "ουδέποτε-υπήρξε.txt"
+
+
+def test_analyze_response_no_longer_carries_a_source_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing is stored, so there is no path to point at."""
+    from document_processor_service.app.services.semantic_analysis import pipeline
+
+    _stub_semantic_calls(monkeypatch)
+    result = pipeline.analyze_document_from_upload(filename="a.txt", data=b"bytes")
+
+    assert "source_path" not in result
+    assert set(result) == {
+        "filename",
+        "artifact_id",
+        "decision_type",
+        "cpv",
+        "budget_codes",
+        "skills",
+        "extraction_note",
+        "skills_note",
+    }
+
+
+def test_analyze_artifact_id_is_stable_for_identical_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
+    from document_processor_service.app.services.semantic_analysis import pipeline
+
+    _stub_semantic_calls(monkeypatch)
+    first = pipeline.analyze_document_from_upload(filename="a.txt", data=b"same bytes")
+    second = pipeline.analyze_document_from_upload(filename="a.txt", data=b"same bytes")
+    other = pipeline.analyze_document_from_upload(filename="a.txt", data=b"other bytes")
+
+    assert first["artifact_id"] == second["artifact_id"]
+    assert first["artifact_id"] != other["artifact_id"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "data"),
+    [("a.txt", b""), ("", b"bytes")],
+)
+def test_analyze_rejects_an_empty_upload_or_a_missing_filename(
+    monkeypatch: pytest.MonkeyPatch, filename: str, data: bytes
+) -> None:
+    from document_processor_service.app.services.semantic_analysis import pipeline
+
+    _stub_semantic_calls(monkeypatch)
+
+    with pytest.raises(ValueError):
+        pipeline.analyze_document_from_upload(filename=filename, data=data)
+
+
+def test_analyze_endpoint_accepts_multipart_and_returns_the_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from document_processor_service.app.services.semantic_analysis import router
+
+    def fake_analyze(*, filename: str, data: bytes) -> dict:
+        return {
+            "filename": filename,
+            "artifact_id": "deadbeefdeadbeef",
+            "decision_type": None,
+            "cpv": [],
+            "budget_codes": [],
+            "skills": [],
+            "extraction_note": None,
+            "skills_note": None,
+        }
+
+    monkeypatch.setattr(router, "analyze_document_from_upload", fake_analyze)
+    response = TestClient(main_module().app).post(
+        "/analyze",
+        files={"file": ("1_clean.txt", "κείμενο".encode("utf-8"), "text/plain")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["filename"] == "1_clean.txt"
+
+
+def test_analyze_endpoint_rejects_uploads_over_the_size_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from document_processor_service.app.services.semantic_analysis import router
+
+    def must_not_run(**kwargs: object) -> dict:
+        raise AssertionError("an oversized upload must be rejected before it is parsed")
+
+    monkeypatch.setattr(router, "analyze_document_from_upload", must_not_run)
+    monkeypatch.setattr(settings, "max_upload_size_bytes", 8)
+    response = TestClient(main_module().app).post(
+        "/analyze",
+        files={"file": ("big.txt", b"x" * 64, "text/plain")},
+    )
+
+    assert response.status_code == 413

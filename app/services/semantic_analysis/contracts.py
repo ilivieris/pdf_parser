@@ -5,16 +5,6 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-class AnalyzeRequest(BaseModel):
-    path: str = Field(
-        description=(
-            "Path to the source file, read directly from disk — absolute, or relative to the "
-            "server's working directory. Not confined to any configured root. The file's own "
-            "extension picks the parser."
-        )
-    )
-
-
 class CpvMatch(BaseModel):
     code: str = Field(description="8-digit CPV code, with the check digit (e.g. '30192000-1') when present.")
     evidence: str = Field(description="Text snippet containing the code, for manual verification.")
@@ -70,9 +60,8 @@ class SkillMatch(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    filename: str
-    source_path: str
-    artifact_id: str
+    filename: str = Field(description="Original name of the uploaded file.")
+    artifact_id: str = Field(description="Content hash of the upload; stable across identical files.")
     decision_type: DecisionType | None = Field(
         default=None, description="Best-guess decision type. None when classification was skipped or unparsable."
     )

@@ -7,8 +7,11 @@ Minimal document-processing API for the chatbot template.
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /extract` | Upload a document, extract its text, get a download link |
+| `POST /analyze` | Upload a document, get its semantic analysis. Nothing is stored |
 | `GET /health` | Readiness: probes MinIO, returns `503` when it is unreachable |
 | `GET /health/live` | Liveness: is the process up. Probes nothing, always `200` |
+
+Both `POST` endpoints take a `multipart/form-data` upload — neither takes a server-side path.
 
 ## Contract
 
@@ -94,6 +97,55 @@ with `mc ilm rule rm --id document-processor-sources <alias>/<bucket>`.
 There is deliberately no "delete the output immediately" switch: the response *is* a link to that
 object, so deleting it would hand back a dead URL. If you want the text to exist only for the
 duration of one request, the contract has to change — return the text inline instead of a link.
+
+## Semantic Analysis (`POST /analyze`)
+
+Upload a document and get back what it *is* and what it *contains*, as structured fields.
+Unlike `/extract`, **nothing is kept**: no MinIO object, no artifact, no download link. The
+upload is the whole input, so the caller's files never have to be reachable from the server —
+which is why this endpoint needs no volume mount and works against a remote API.
+
+(The parsers for PDF/DOCX need a real path, so `parse_bytes` writes a temp file and removes it
+in a `finally` block. It lives for the duration of the parse and nothing survives the request.)
+
+```bash
+curl -X POST http://localhost:8000/analyze -F "file=@extracted/1_clean.txt"
+```
+
+Response fields:
+
+| Field | Meaning |
+| --- | --- |
+| `filename` | The uploaded file's original name |
+| `artifact_id` | Content hash of the upload; identical files give the same id |
+| `decision_type` | Diavgeia decision type (uid + label), or `null` when not classified |
+| `cpv` | CPV codes found, each with evidence and its source |
+| `budget_codes` | ΚΑΕ/ΑΛΕ codes found, each with evidence and its source |
+| `skills` | ESCO skill matches, with the taxonomy's own label and concept URI |
+| `extraction_note` | Set when the LLM pass was skipped or failed |
+| `skills_note` | Set when skills detection was skipped or ran on a truncated excerpt |
+
+Two flags decide how much to trust a row:
+
+- **`source`** — `regex` is a direct pattern match on the real text; `llm` is a model suggestion.
+- **`confirmed`** — `true` only after deterministic verification (the evidence is a verbatim
+  substring of the document, and the code/uid is well-formed and real). A `confirmed: false`
+  row is an unverified suggestion: review it before acting on it.
+
+Skills come from a local FAISS index built from the real ESCO taxonomy, so every `label` and
+`source_uri` is an actual ESCO entry rather than free-form model text.
+
+### The ESCO Index
+
+On startup the service builds that index if it is missing: roughly **13,000 vectors, ~7 minutes**,
+during which the app accepts no traffic at all — `/extract` included, since the build blocks
+application startup. `docker-compose.yml` therefore keeps it in a named volume (`esco-index`), so
+it is built once and reused across container recreations. Without that volume every
+`docker compose up --build` pays the full rebuild.
+
+`/analyze` needs `OPENAI_API_KEY` for decision-type classification, the LLM CPV/ΑΛΕ pass and
+skills detection. Without a working key those steps are skipped, the regex passes still run, and
+the two `*_note` fields explain what was left out.
 
 ## Large Documents And Chunking
 
@@ -266,7 +318,22 @@ curl -X POST http://localhost:8000/extract \
   -F "post_processing=none"
 ```
 
-`diavgeia_parsing.py` does the same for every PDF under `diavgeia_sample/test/`.
+## Client Scripts
+
+Two scripts drive the endpoints over a whole folder:
+
+```bash
+# PDFs -> extracted text files (uploads each PDF, downloads each result)
+python diavgeia_parsing.py --pdf-dir diavgeia_sample/test --out-dir extracted --post-processing clean
+
+# extracted text files -> semantic analysis (uploads each .txt, prints the findings)
+python diavgeia_analyze.py extracted --save analysis
+```
+
+Both preflight `GET /health` and stop with the failing dependency's reason rather than emitting
+one error per file, both exit non-zero on any failure, and both force UTF-8 on stdout so Greek
+output survives a cp1252 Windows console.
+
 
 ## Environment Variables
 

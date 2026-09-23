@@ -10,7 +10,6 @@ from document_processor_service.app.services.semantic_analysis.contracts import 
 from document_processor_service.app.services.semantic_analysis.cpv_extractor import extract_cpv
 from document_processor_service.app.services.semantic_analysis.exceptions import (
     LlmExtractionError,
-    SemanticAnalysisError,
     SkillsDetectionError,
 )
 from document_processor_service.app.services.semantic_analysis.llm_extractor import extract_llm_fields
@@ -28,19 +27,6 @@ def _artifact_id(*parts: str | bytes) -> str:
             digest.update(part.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()[:16]
-
-
-def _read_bytes(path: str) -> bytes:
-    resolved = Path(path).expanduser()
-    if not resolved.is_absolute():
-        resolved = Path.cwd() / resolved
-
-    try:
-        return resolved.read_bytes()
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(f"File not found: {resolved}") from exc
-    except OSError as exc:
-        raise SemanticAnalysisError(f"Failed to read file '{resolved}': {exc}") from exc
 
 
 def _merge_cpv(regex_matches: list[CpvMatch], llm_matches: list[CpvMatch]) -> list[CpvMatch]:
@@ -66,16 +52,25 @@ def _merge_budget_codes(regex_matches: list[BudgetCodeMatch], llm_matches: list[
     return merged
 
 
-def analyze_document_from_local(*, path: str) -> dict[str, object]:
-    normalized_path = str(path or "").strip()
-    if not normalized_path:
-        raise ValueError("path is required")
+def analyze_document_from_upload(*, filename: str, data: bytes) -> dict[str, object]:
+    """Analyse an uploaded document, keeping nothing.
 
-    data = _read_bytes(normalized_path)
-    parser_suffix = Path(normalized_path).suffix.lower()
+    Unlike /extract there is no artifact to hand back afterwards, so nothing is persisted:
+    no object in MinIO, no file left on disk. (The PDF/DOCX parsers need a real path, so
+    parse_bytes writes a temp file for the duration of the parse and removes it in a finally
+    block.) The upload is the whole input, so the caller's files no longer need to be
+    reachable from the server's filesystem -- which is what the old path-based contract required.
+    """
+    normalized_filename = str(filename or "").strip()
+    if not normalized_filename:
+        raise ValueError("filename is required")
+    if not data:
+        raise ValueError("the uploaded file is empty")
+
+    parser_suffix = Path(normalized_filename).suffix.lower()
 
     text = DocumentParser().parse_bytes(data, parser_suffix)
-    artifact_id = _artifact_id(normalized_path, data)
+    artifact_id = _artifact_id(normalized_filename, data)
 
     regex_cpv = extract_cpv(text)
     regex_budget_codes = extract_budget_codes(text)
@@ -94,7 +89,7 @@ def analyze_document_from_local(*, path: str) -> dict[str, object]:
             f"Η ταξινόμηση τύπου πράξης και η LLM-based εξαγωγή CPV/ΑΛΕ παραλείφθηκαν: {exc}. "
             "Τα cpv/budget_codes παρακάτω προέρχονται μόνο από το regex πέρασμα."
         )
-        log_event(logger, "llm_extraction_skipped", path=normalized_path, error=str(exc))
+        log_event(logger, "llm_extraction_skipped", filename=normalized_filename, error=str(exc))
 
     skills_matches: list = []
     skills_note: str | None = None
@@ -104,12 +99,12 @@ def analyze_document_from_local(*, path: str) -> dict[str, object]:
             skills_note = f"Η ανίχνευση δεξιοτήτων εξέτασε μόνο τους πρώτους {MAX_CHARS} χαρακτήρες του εγγράφου."
     except SkillsDetectionError as exc:
         skills_note = f"Η ανίχνευση δεξιοτήτων παραλείφθηκε: {exc}"
-        log_event(logger, "skills_detection_skipped", path=normalized_path, error=str(exc))
+        log_event(logger, "skills_detection_skipped", filename=normalized_filename, error=str(exc))
 
     log_event(
         logger,
         "document_analyzed",
-        path=normalized_path,
+        filename=normalized_filename,
         artifact_id=artifact_id,
         decision_type_confirmed=bool(decision_type and decision_type.confirmed),
         cpv_count=len(cpv_matches),
@@ -118,8 +113,7 @@ def analyze_document_from_local(*, path: str) -> dict[str, object]:
     )
 
     return {
-        "filename": Path(normalized_path).name or "document.bin",
-        "source_path": normalized_path,
+        "filename": Path(normalized_filename).name or "document.bin",
         "artifact_id": artifact_id,
         "decision_type": decision_type,
         "cpv": cpv_matches,
