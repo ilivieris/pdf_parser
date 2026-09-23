@@ -4,6 +4,7 @@ import requests
 # Ρυθμίσεις
 PDF_DIR = Path("diavgeia_sample/test")
 ENDPOINT = "http://localhost:8000/extract"
+POST_PROCESSING = "none"  # "none" | "clean" | "markdown"
 
 
 def find_pdfs(directory: Path) -> list[Path]:
@@ -11,27 +12,20 @@ def find_pdfs(directory: Path) -> list[Path]:
     return list(directory.rglob("*.pdf"))
 
 
-def extract_pdf(pdf_path: Path):
-    """Στέλνει ένα PDF στο extraction endpoint."""
-    # docker-compose.yml κάνει mount ολόκληρο το repo root στο
-    # /app/extracted/workspace, άρα τα paths πρέπει να έχουν αυτό το prefix
-    # για να επιλυθούν σωστά μέσα στο container (DOCUMENT_OUTPUT_ROOT=/app/extracted).
-    path_for_api = f"workspace/{pdf_path.as_posix()}"
+def extract_pdf(pdf_path: Path, post_processing: str = POST_PROCESSING):
+    """Ανεβάζει ένα PDF στο extraction endpoint.
 
-    payload = {
-        "path": path_for_api,
-        "post_processing": "clean"
-    }
-
-    response = requests.post(
-        ENDPOINT,
-        json=payload,
-        headers={
-            "accept": "*/*",
-            "Content-Type": "application/json",
-        },
-        timeout=300,
-    )
+    Το API το αποθηκεύει στο MinIO, το διαβάζει πίσω από το bucket, κάνει το parsing
+    και γράφει το αποτέλεσμα ξανά στο MinIO, επιστρέφοντας presigned download link.
+    """
+    with pdf_path.open("rb") as handle:
+        response = requests.post(
+            ENDPOINT,
+            files={"file": (pdf_path.name, handle, "application/pdf")},
+            data={"post_processing": post_processing},
+            headers={"accept": "application/json"},
+            timeout=600,
+        )
 
     response.raise_for_status()
 
@@ -52,7 +46,9 @@ def main():
             result = extract_pdf(pdf_path)
 
             print("  ✓ Success")
-            print(f"  Response: {result}")
+            print(f"  Download URL: {result['download_url']}")
+            if result.get("note"):
+                print(f"  Note: {result['note']}")
 
         except requests.RequestException as e:
             print(f"  ✗ HTTP Error: {e}")

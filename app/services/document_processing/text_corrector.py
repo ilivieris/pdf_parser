@@ -209,8 +209,12 @@ def _run(text: str, system_prompt: str, *, log_label: str) -> CorrectionResult:
         log_event(logger, "text_correction_skipped", mode=log_label, token_count=token_count, limit=hard_limit)
         return CorrectionResult(text=text, note=note)
 
-    chunk_budget = max(1, settings.document_chunk_tokens)
-    chunks = [text] if token_count <= chunk_budget else _split_into_chunks(text, chunk_budget)
+    if len(text) < 2*settings.document_chunk_tokens:
+        chunks = [text]
+        chunk_budget = None
+    else:
+        chunk_budget = settings.document_chunk_tokens
+        chunks = [text] if token_count <= chunk_budget else _split_into_chunks(text, chunk_budget)
 
     log_event(
         logger,

@@ -9,7 +9,7 @@ class AnalyzeRequest(BaseModel):
     path: str = Field(
         description=(
             "Path to the source file, read directly from disk — absolute, or relative to the "
-            "server's working directory. Not confined to DOCUMENT_OUTPUT_ROOT. The file's own "
+            "server's working directory. Not confined to any configured root. The file's own "
             "extension picks the parser."
         )
     )
